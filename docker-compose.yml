@@ -24,11 +24,12 @@ services:
       UDP_LISTEN_PORT: "9000"
       HTTP_PORT: "8080"
       SESSION_IDLE_TIMEOUT: "5"          # 会话空闲超时（秒）
+      LATEST_ONLY_WAIT: "2"              # 「只送最新读数」等回包秒数，等满即转发留存读数
       RECEIVER_A_HOST: receiver-a
       RECEIVER_A_PORT: "9001"
       RECEIVER_B_HOST: receiver-b
       RECEIVER_B_PORT: "9001"
-      DB_PATH: /data/proxy.db            # 目标接收器持久化（重启保留）
+      DB_PATH: /data/proxy.db            # 目标接收器与「只送最新」设置持久化（重启保留）
       # UPSTREAM_PORT_COOLDOWN: "30"     # 上游端口冷却，须大于最大回包延迟
     ports:
       - "9000:9000/udp"                  # 遥测终端发往这里

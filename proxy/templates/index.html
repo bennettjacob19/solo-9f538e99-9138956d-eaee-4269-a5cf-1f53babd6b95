@@ -41,6 +41,7 @@
   <div class="card"><div class="label">接收器 A</div><div class="big" style="font-size:1rem">{{ receivers["A"] }}</div></div>
   <div class="card"><div class="label">接收器 B</div><div class="big" style="font-size:1rem">{{ receivers["B"] }}</div></div>
   <div class="card"><div class="label">会话空闲超时</div><div class="big" style="font-size:1rem">{{ idle_timeout }} s</div></div>
+  <div class="card"><div class="label">只送最新等待</div><div class="big" style="font-size:1rem">{{ latest_only_wait }} s</div></div>
   <div class="card"><div class="label">终端发送地址（UDP）</div><div class="big" style="font-size:1rem">本机 :{{ udp_listen_port }}</div></div>
 </div>
 
@@ -58,26 +59,56 @@
 </section>
 
 <section>
-  <h2>发送试传报文</h2>
+  <h2>只送最新读数（按终端 IP:端口）</h2>
+  <form method="post" action="{{ url_for('latest_only_add') }}">
+    <div class="row">
+      <label>终端 IP <input name="ip" placeholder="如 127.0.0.1" required size="14"></label>
+      <label>端口 <input name="port" type="number" min="1" max="65535" required style="width:90px"></label>
+      <button type="submit">启用</button>
+    </div>
+  </form>
+  <table>
+    <thead><tr><th>已启用的终端地址</th><th></th></tr></thead>
+    <tbody id="latest-only"><tr><td colspan="2">加载中…</td></tr></tbody>
+  </table>
+  <p class="hint">设置从该终端<b>下次建会话</b>起生效；已建立的会话保持原行为（空闲 {{ idle_timeout }} 秒过期后重建即生效）。
+    启用后：没有读数在等回包时新读数立即转发；等待期间只留最后收到的一条待发读数，
+    收到当前读数的回包或等满 {{ latest_only_wait }} 秒后再转发留存的读数；
+    有效回包原样交给终端，超时后到达或重复的回包丢弃；即使新旧读数字节相同，旧回包也不能结束新读数的等待。
+    网页试传的源 IP 为 127.0.0.1。</p>
+</section>
+
+<section>
+  <h2>试传区（同一固定源端口连发 3～8 条读数）</h2>
   <form method="post" action="{{ url_for('test') }}">
     <div class="row">
-      <label>报文 <input name="payload" value="PING" size="24"></label>
-      <label>回包延迟(秒) <input name="delay" type="number" min="0" step="0.5" value="0" style="width:70px"></label>
-      <label>等待超时(秒) <input name="wait" type="number" min="1" max="60" value="10" style="width:70px"></label>
-      <label>固定客户端端口 <input name="client_port" type="number" min="1" max="65535" placeholder="留空=随机" style="width:110px"></label>
-      <button type="submit">发送</button>
+      <label>固定源端口 <input name="source_port" type="number" min="1" max="65535" value="30500" required style="width:90px"></label>
+      <label>条数 <input id="count" name="count" type="number" min="3" max="8" value="4" style="width:60px"></label>
+      <label>读数前缀 <input name="base" value="LEVEL" size="8"></label>
+      <label>等待超时(秒) <input name="wait" type="number" min="2" max="90" value="30" style="width:70px"></label>
+      <button type="submit">连发</button>
     </div>
-    <p class="hint">不填端口时每次试传都用新端口（总是新会话）。填同一端口可观察：空闲 {{ idle_timeout }} 秒内复用旧会话（仍走旧接收器）；超时后同端口重建会话，也收不到旧会话迟到的回包。</p>
+    <div class="row"><label>逐条回包延迟(秒)：</label><span id="delays"></span></div>
   </form>
+  <p class="hint">从同一固定源端口连发 3～8 条实际 UDP 读数，逐条设置回包延迟；结果显示实收回包和被替换的读数条数。
+    对 <code>127.0.0.1:源端口</code> 启用「只送最新读数」后（等旧会话空闲过期再试），可观察读数留存与替换；
+    单条延迟超过会话空闲超时（{{ idle_timeout }}s）会导致会话中途过期、待发读数被清掉。</p>
   {% if last_test %}
   <div class="card" style="margin-top:10px">
     <div class="label">最近一次试传（{{ last_test.time }}）</div>
-    <div>客户端 <code>{{ last_test.client }}</code> → 实际去向接收器
-      <b>{{ last_test.receiver or "?" }}</b>，报文 <code>{{ last_test.payload }}</code></div>
-    {% if last_test.ok %}
-      <div class="result-ok">收到回包：<code>{{ last_test.reply }}</code>（RTT {{ last_test.rtt }}s）</div>
-    {% else %}
+    {% if last_test.error %}
       <div class="result-err">{{ last_test.error }}</div>
+    {% endif %}
+    {% if last_test.sent %}
+    <div>客户端 <code>{{ last_test.client }}</code>，会话模式 <b>{{ last_test.mode or "?" }}</b>，
+      从同一固定源端口连发 {{ last_test.sent }} 条读数
+      （{% for r in last_test.readings %}#{{ r.i }} 延迟 {{ r.delay }}s{% if not loop.last %}，{% endif %}{% endfor %}）</div>
+    {% if last_test.received %}
+      <div class="result-ok">实收回包 {{ last_test.received }} 条：
+        {% for r in last_test.replies %}<code>{{ r.payload }}</code>({{ r.at }}s){% if not loop.last %} {% endif %}{% endfor %}
+      </div>
+    {% endif %}
+    <div>被替换的读数 <b>{{ last_test.replaced }}</b> 条；实际转发 {{ last_test.forwarded }} 条。</div>
     {% endif %}
   </div>
   {% endif %}
@@ -86,8 +117,8 @@
 <section>
   <h2>活动会话 <span class="hint">（每 2 秒自动刷新）</span></h2>
   <table>
-    <thead><tr><th>ID</th><th>客户端</th><th>固定接收器</th><th>上游端口</th><th>状态</th><th>空闲(s)</th><th>存活(s)</th></tr></thead>
-    <tbody id="sessions"><tr><td colspan="7">加载中…</td></tr></tbody>
+    <thead><tr><th>ID</th><th>客户端</th><th>模式</th><th>固定接收器</th><th>上游端口</th><th>状态</th><th>等回包</th><th>待发</th><th>已替换</th><th>空闲(s)</th><th>存活(s)</th></tr></thead>
+    <tbody id="sessions"><tr><td colspan="11">加载中…</td></tr></tbody>
   </table>
 </section>
 
@@ -101,15 +132,40 @@
 
 <script>
 function esc(s) { const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+function renderDelays() {
+  const n = Math.min(8, Math.max(3, parseInt(document.getElementById('count').value || '4', 10)));
+  const box = document.getElementById('delays');
+  const old = {};
+  box.querySelectorAll('input').forEach(i => old[i.name] = i.value);
+  let html = '';
+  for (let i = 0; i < n; i++) {
+    const v = old['d' + i] !== undefined ? old['d' + i] : (i === 0 ? '1' : '0');
+    html += `<label>#${i + 1} <input name="d${i}" type="number" min="0" max="10" step="0.1" value="${v}" style="width:64px"></label> `;
+  }
+  box.innerHTML = html;
+}
+document.getElementById('count').addEventListener('input', renderDelays);
+renderDelays();
+
 async function refresh() {
   try {
     const s = await (await fetch('/api/state')).json();
     document.getElementById('target').textContent = s.target;
+    const lo = s.latest_only.map(c =>
+      `<tr><td><code>${esc(c)}</code></td><td>` +
+      `<form method="post" action="/latest-only/delete" style="display:inline">` +
+      `<input type="hidden" name="client" value="${esc(c)}">` +
+      `<button type="submit">取消</button></form></td></tr>`);
+    document.getElementById('latest-only').innerHTML =
+      lo.join('') || '<tr><td colspan="2">（未设置）</td></tr>';
     const ss = s.sessions.map(x =>
-      `<tr><td>${x.id}</td><td>${esc(x.client)}</td><td><b>${esc(x.receiver)}</b></td>` +
-      `<td>${x.upstream_port ?? ''}</td><td>${esc(x.state)}</td><td>${x.idle}</td><td>${x.age}</td></tr>`);
+      `<tr><td>${x.id}</td><td>${esc(x.client)}</td><td>${esc(x.mode)}</td><td><b>${esc(x.receiver)}</b></td>` +
+      `<td>${x.upstream_port ?? ''}</td><td>${esc(x.state)}</td>` +
+      `<td>${x.awaiting ? '是' : ''}</td><td>${x.has_pending ? '有' : ''}</td><td>${x.replaced}</td>` +
+      `<td>${x.idle}</td><td>${x.age}</td></tr>`);
     document.getElementById('sessions').innerHTML =
-      ss.join('') || '<tr><td colspan="7">（无活动会话）</td></tr>';
+      ss.join('') || '<tr><td colspan="11">（无活动会话）</td></tr>';
     const ms = s.messages.map(m =>
       `<tr><td>${m.id}</td><td>${esc(m.ts)}</td><td>${esc(m.client)}</td><td>${m.session_id || ''}</td>` +
       `<td>${esc(m.direction)}</td><td>${esc(m.receiver)}</td><td>${esc(m.payload)}</td><td>${esc(m.note)}</td></tr>`);
